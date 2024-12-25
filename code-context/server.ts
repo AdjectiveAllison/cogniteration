@@ -71,6 +71,10 @@ const AnalyzeDirectorySchema = z.object({
 	path: z.string(),
 });
 
+const ReadFilesSchema = z.object({
+	paths: z.array(z.string())
+});
+
 // Type definitions
 interface FileInfo {
 	path: string;
@@ -83,6 +87,12 @@ interface AnalyzeDirectoryResponse {
 	files: FileInfo[];
 	totalFiles: number;
 	totalTokens: number;
+}
+
+interface ReadFileResult {
+	path: string;
+	content: string;
+	error?: string;
 }
 
 // Common binary file extensions
@@ -131,6 +141,43 @@ async function getFileCounts(filePath: string): Promise<{ lineCount: number; tok
 		lineCount: lines.length,
 		tokenCount
 	};
+}
+
+// Read multiple files safely
+async function readFiles(paths: string[]): Promise<ReadFileResult[]> {
+	const results: ReadFileResult[] = [];
+
+	for (const reqPath of paths) {
+		try {
+			// Validate path is allowed
+			const validPath = await validatePath(reqPath);
+
+			// Skip binary files
+			if (isBinaryFile(validPath)) {
+				results.push({
+					path: reqPath,
+					content: "",
+					error: "Binary file"
+				});
+				continue;
+			}
+
+			// Read file
+			const content = await readFile(validPath, 'utf-8');
+			results.push({
+				path: reqPath,
+				content
+			});
+		} catch (error) {
+			results.push({
+				path: reqPath,
+				content: "",
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
+	return results;
 }
 
 // Read .gitignore file and return array of patterns
@@ -224,42 +271,99 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 					"in each directory. Skips binary files and recursively processes " +
 					"subdirectories.",
 				inputSchema: zodToJsonSchema(AnalyzeDirectorySchema) as z.infer<typeof ToolSchema>["inputSchema"],
+			},
+			{
+				name: "read_files",
+				description:
+					"Read the contents of multiple files. Each file is independently validated " +
+					"and read, with errors returned per-file rather than failing the entire operation. " +
+					"Binary files are skipped with an error message.",
+				inputSchema: zodToJsonSchema(ReadFilesSchema) as z.infer<typeof ToolSchema>["inputSchema"],
 			}
 		],
 	};
 });
+
+// Format directory analysis results
+function formatAnalysisResponse(response: AnalyzeDirectoryResponse): string {
+	const lines = [
+		'# Format: filename lineCount tokenCount',
+		...response.files.map(f => `${f.path} ${f.lineCount} ${f.tokenCount}`),
+		`TOTALS ${response.totalFiles} ${response.totalTokens}`
+	];
+	return lines.join('\n');
+}
+
+// Format file reading results
+function formatReadFilesResponse(results: ReadFileResult[]): string {
+	return results.map(file => {
+		if (file.error) {
+			return [
+				`<document>`,
+				`<source>${file.path}</source>`,
+				`<error>${file.error}</error>`,
+				`</document>`
+			].join('\n');
+		}
+		return [
+			`<document>`,
+			`<source>${file.path}</source>`,
+			file.content,
+			`</document>`
+		].join('\n');
+	}).join('\n\n');
+}
 
 // Implement analyze_directory tool
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
 	try {
 		const { name, arguments: args } = request.params;
 
-		if (name !== "analyze_directory") {
-			throw new Error(`Unknown tool: ${name}`);
+		switch (name) {
+			case "analyze_directory": {
+				const parsed = AnalyzeDirectorySchema.safeParse(args);
+				if (!parsed.success) {
+					throw new Error(`Invalid arguments: ${parsed.error}`);
+				}
+
+				const validPath = await validatePath(parsed.data.path);
+				const files = await processDirectory(validPath, validPath);
+				const totalTokens = files.reduce((sum, file) => sum + file.tokenCount, 0);
+
+				const response: AnalyzeDirectoryResponse = {
+					rootPath: validPath,
+					files,
+					totalFiles: files.length,
+					totalTokens
+				};
+
+				return {
+					content: [{
+						type: "text",
+						text: formatAnalysisResponse(response)
+					}],
+				};
+			}
+
+			case "read_files": {
+				const parsed = ReadFilesSchema.safeParse(args);
+				if (!parsed.success) {
+					throw new Error(`Invalid arguments: ${parsed.error}`);
+				}
+
+				const results = await readFiles(parsed.data.paths);
+
+				return {
+					content: [{
+						type: "text",
+						text: formatReadFilesResponse(results)
+					}],
+				};
+			}
+
+			default:
+				throw new Error(`Unknown tool: ${name}`);
 		}
-
-		const parsed = AnalyzeDirectorySchema.safeParse(args);
-		if (!parsed.success) {
-			throw new Error(`Invalid arguments: ${parsed.error}`);
-		}
-
-		const validPath = await validatePath(parsed.data.path);
-		const files = await processDirectory(validPath, validPath);
-		const totalTokens = files.reduce((sum, file) => sum + file.tokenCount, 0);
-
-		const response: AnalyzeDirectoryResponse = {
-			rootPath: validPath,
-			files,
-			totalFiles: files.length,
-			totalTokens
-		};
-
-		return {
-			content: [{
-				type: "text",
-				text: JSON.stringify(response, null, 2)
-			}],
-		};
 	} catch (error) {
 		const errorMessage = error instanceof Error ? error.message : String(error);
 		return {
