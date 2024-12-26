@@ -175,8 +175,23 @@ def create_server(language_server: LanguageServer) -> Server:
 
         result = await language_server.validate_file(request.params.arguments["file_path"])
 
+        # Format results into readable text
+        text = f"Validation results for {result.file_path}:\n"
+        
+        if result.error:
+            text += f"Error: {result.error}\n"
+        elif not result.diagnostics:
+            text += "No issues found\n"
+        else:
+            text += "\nDiagnostics:\n"
+            for diag in result.diagnostics:
+                severity = ["Error", "Warning", "Info", "Hint"][diag.severity - 1]
+                text += f"• {severity} at line {diag.line}, column {diag.column}: {diag.message}\n"
+                if diag.source:
+                    text += f"  Source: {diag.source}\n"
+        
         return ServerResult(root=CallToolResult(
-            content=[TextContent(type="text", text=result.model_dump_json())]
+            content=[TextContent(type="text", text=text)]
         ))
 
     server.request_handlers[ListToolsRequest] = handle_list_tools
