@@ -5,6 +5,8 @@ import {
 	CallToolRequestSchema,
 	ListToolsRequestSchema,
 	ToolSchema,
+	ListPromptsRequestSchema,
+	GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -255,6 +257,9 @@ const server = new Server(
 	{
 		capabilities: {
 			tools: {},
+			prompts: {
+				listChanged: false
+			},
 		},
 	}
 );
@@ -294,27 +299,17 @@ function formatAnalysisResponse(response: AnalyzeDirectoryResponse): string {
 	return lines.join('\n');
 }
 
-// Format file reading results
+// Format file reading results with zero indentation
 function formatReadFilesResponse(results: ReadFileResult[]): string {
 	return results.map(file => {
 		if (file.error) {
-			return [
-				`<document>`,
-				`<source>${file.path}</source>`,
-				`<error>${file.error}</error>`,
-				`</document>`
-			].join('\n');
+			return `<document><source>${file.path}</source><e>${file.error}</e></document>`;
 		}
-		return [
-			`<document>`,
-			`<source>${file.path}</source>`,
-			file.content,
-			`</document>`
-		].join('\n');
+		return `<document><source>${file.path}</source><document_content>${file.content}</document_content></document>`;
 	}).join('\n\n');
 }
 
-// Implement analyze_directory tool
+// Implement the tools
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
 	try {
 		const { name, arguments: args } = request.params;
@@ -352,7 +347,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 				}
 
 				const results = await readFiles(parsed.data.paths);
-
 				return {
 					content: [{
 						type: "text",
@@ -371,6 +365,67 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 			isError: true,
 		};
 	}
+});
+
+// Define available prompts
+enum PromptName {
+	ANALYZE_CODEBASE = "analyze-codebase"
+}
+
+const AVAILABLE_PROMPTS = {
+	[PromptName.ANALYZE_CODEBASE]: {
+		name: PromptName.ANALYZE_CODEBASE,
+		description: "Analyzes the codebase structure, providing guidance on token counts and file sizes",
+		messages: [
+			{
+				role: "user",
+				content: {
+					type: "text",
+					text: `When analyzing codebases using code-context tools:
+
+1. Start with analyzing the directory structure:
+   - Use analyze_directory to get token counts and line counts
+   - Pay attention to file sizes to avoid token limit issues
+   - Be mindful of binary files and .gitignore rules
+
+2. When reading files:
+   - Check token counts before loading large files
+   - Use read_files selectively for relevant content
+   - Consider loading files in batches if needed
+   
+3. Provide clear summaries:
+   - Total size of the codebase
+   - Largest files that need special handling
+   - Key files that warrant detailed review
+
+Remember: The tools handle .gitignore rules and binary file detection automatically.`
+				}
+			}
+		]
+	}
+};
+
+// Implement prompt listing
+server.setRequestHandler(ListPromptsRequestSchema, async () => {
+	return {
+		prompts: Object.values(AVAILABLE_PROMPTS)
+	};
+});
+
+// Implement prompt retrieval
+server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+	const { name, arguments: args } = request.params;
+	console.error('GetPrompt Request:', JSON.stringify({ name, args }, null, 2));
+	console.error('Available prompts:', Object.keys(AVAILABLE_PROMPTS));
+
+	const prompt = AVAILABLE_PROMPTS[name];
+
+	if (!prompt) {
+		console.error('Prompt not found:', name);
+		throw new Error(`Unknown prompt: ${name}`);
+	}
+
+	return prompt;
 });
 
 // Start server
